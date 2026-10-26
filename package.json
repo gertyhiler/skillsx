@@ -1,0 +1,39 @@
+{
+  "name": "skillsx",
+  "version": "0.1.0",
+  "description": "Registry-first skill management with categories, reproducible installs and agent projections",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "skillsx": "bin/skillsx.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./schema": "./schema/skills.registry.schema.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "schema",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "scripts"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/skillsx.mjs && node --check src/index.mjs && node --check src/storage.mjs && node --check scripts/smoke-codex.mjs && node --test",
+    "test:codex": "node scripts/smoke-codex.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gertyhiler/skillsx.git"
+  },
+  "homepage": "https://github.com/gertyhiler/skillsx#readme",
+  "bugs": {
+    "url": "https://github.com/gertyhiler/skillsx/issues"
+  }
+}
