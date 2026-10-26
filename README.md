@@ -1,10 +1,36 @@
-# skillsx
+# SkillsX
 
-A Node CLI and library for skills you can account for.
+![SkillsX — Every skill. Accounted for.](docs/assets/hero.png)
+
+[![Check](https://github.com/gertyhiler/skillsx/actions/workflows/check.yml/badge.svg)](https://github.com/gertyhiler/skillsx/actions/workflows/check.yml)
+[![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-7af0bd?style=flat-square&labelColor=101b24)](package.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-7af0bd?style=flat-square&labelColor=101b24)](LICENSE)
+
+**One registry. Your skills. Your agents.**
+
+A dependency-free Node CLI and library for installing, organizing and tracking
+agent skills across projects and agent destinations.
+
+[See it work](#see-it-work) · [Get started](#run-locally) · [Registry contract](docs/contract.md) · [CLI reference](#cli)
 
 One `.agents/skills.registry.json` describes every installed skill, its optional
 category, source revision, file hashes and agent destinations. No machine-local
 ownership database. Clone the repository and verify the same installation.
+
+## See it work
+
+![SkillsX CLI demo: install a skill, create a Claude symlink, move the skill and detect a modified payload](docs/assets/demo.gif)
+
+[Watch the MP4](https://github.com/gertyhiler/skillsx/raw/refs/heads/main/docs/assets/demo.mp4)
+· [Read the transcript](docs/assets/demo.json)
+· [Reproduce the demo](scripts/demo/README.md)
+
+Real CLI output from a disposable offline fixture; playback timing is edited.
+The final verification deliberately catches a modified external skill.
+
+| Keep it organized | Keep it accountable | Share it across agents |
+| --- | --- | --- |
+| Flat skills and optional categories, together. | Hash the entire package. Detect drift without accepting it. | One canonical store, relative links or checked copies. |
 
 ## What it does
 

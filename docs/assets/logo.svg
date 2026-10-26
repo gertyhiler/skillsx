@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="SkillsX logo">
+  <rect width="128" height="128" rx="30" fill="#101b24"/>
+  <path d="M29 29 64 64 29 99M99 29 64 64 99 99" fill="none" stroke="#7af0bd" stroke-width="12" stroke-linecap="square" stroke-linejoin="miter"/>
+  <rect x="57" y="57" width="14" height="14" fill="#f4f8f6"/>
+</svg>

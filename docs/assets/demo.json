@@ -1,0 +1,53 @@
+{
+  "title": "SkillsX · one registry, every skill",
+  "events": [
+    {
+      "command": "skillsx init",
+      "output": "{\n  \"version\": 1,\n  \"categories\": {},\n  \"sources\": {},\n  \"agents\": {},\n  \"skills\": {}\n}",
+      "error": false
+    },
+    {
+      "command": "skillsx category external",
+      "output": "{\n  \"version\": 1,\n  \"categories\": {\n    \"external\": {}\n  },\n  \"sources\": {},\n  \"agents\": {},\n  \"skills\": {}\n}",
+      "error": false
+    },
+    {
+      "command": "skillsx source demo --copy-path upstream",
+      "output": "{\n  \"version\": 1,\n  \"categories\": {\n    \"external\": {}\n  },\n  \"sources\": {\n    \"demo\": {\n      \"type\": \"copy\",\n      \"path\": \"upstream\"\n    }\n  },\n  \"agents\": {},\n  \"skills\": {}\n}",
+      "error": false
+    },
+    {
+      "command": "skillsx install review --source demo --path review --category external",
+      "output": "install: OK",
+      "error": false
+    },
+    {
+      "command": "skillsx agent claude-code --transport symlink",
+      "output": "agent: OK",
+      "error": false
+    },
+    {
+      "command": "readlink .claude/skills/review",
+      "output": "../../.agents/skills/external/review"
+    },
+    {
+      "command": "skillsx move review --uncategorized",
+      "output": "move: OK",
+      "error": false
+    },
+    {
+      "command": "skillsx verify",
+      "output": "verify: OK",
+      "error": false
+    },
+    {
+      "command": "printf '\\nUnexpected local edit.\\n' >> .agents/skills/review/SKILL.md",
+      "output": ""
+    },
+    {
+      "command": "skillsx verify",
+      "output": "verify: findings\n  payload-modified: review (.agents/skills/review)",
+      "error": true
+    }
+  ]
+}
