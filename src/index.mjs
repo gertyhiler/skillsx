@@ -41,6 +41,81 @@ function sourceCheck(source) {
     assert(!own(source, 'url') && !own(source, 'ref'), 'Copy sources use a relative path only');
   }
 }
+const dependencyManifestPath = 'agents/skillsx.json';
+
+function readDependencies(registry, skill, directory) {
+  // Use directory entries so discovery has identical casing rules on every FS.
+  if (!fs.readdirSync(directory, { withFileTypes: true }).some(entry => entry.name === 'agents' && entry.isDirectory())) return [];
+  const entries = fs.readdirSync(safePath(directory, 'agents'), { withFileTypes: true });
+  if (!entries.some(entry => entry.name === 'skillsx.json' && entry.isFile())) return [];
+  const file = safePath(directory, dependencyManifestPath);
+  const contents = fs.readFileSync(file, 'utf8');
+  let manifest;
+  try { manifest = JSON.parse(contents); } catch { throw new Error('Dependency manifest must contain valid JSON'); }
+  fields(manifest, ['version', 'dependencies'], 'dependency manifest');
+  assert(manifest.version === 1 && Array.isArray(manifest.dependencies), 'Expected dependency manifest version 1 and a dependencies array');
+  const ids = new Set();
+  return manifest.dependencies.map(dependency => {
+    fields(dependency, ['url', 'path', 'revision'], 'dependency');
+    const { url, path, revision } = dependency;
+    subpath(path);
+    const id = path.split('/').at(-1);
+    name(id);
+    assert(!ids.has(id), `Duplicate dependency: ${id}`);
+    ids.add(id);
+    if (!own(dependency, 'url')) {
+      const source = skill.source;
+      assert(!own(dependency, 'revision') && source && registry.sources[source.id].type === 'git', `Dependency ${id} needs a Git URL and revision outside a Git package`);
+      return { id, source: { id: source.id, path, revision: source.revision } };
+    }
+    assert(typeof url === 'string' && url && typeof revision === 'string' && revisionPattern.test(revision), `Dependency ${id} requires a Git URL and full commit ID`);
+    const matches = Object.keys(registry.sources).filter(key => registry.sources[key].type === 'git' && registry.sources[key].url === url);
+    assert(matches.length === 1, matches.length ? `Ambiguous registered Git source for dependency ${id}` : `No registered Git source for dependency ${id}`);
+    return { id, source: { id: matches[0], path, revision } };
+  });
+}
+
+function sameSource(left, right) {
+  return left?.id === right.id && left.path === right.path;
+}
+
+function sameRevision(left, right) {
+  return sameSource(left, right) && left.revision === right.revision;
+}
+
+function dependencyFindings(registry, graph) {
+  const findings = [];
+  const active = new Set(), visited = new Set();
+  function visit(skill) {
+    if (visited.has(skill)) return;
+    active.add(skill);
+    for (const { id: target, source } of graph.get(skill) ?? []) {
+      if (!own(registry.skills, target)) findings.push({ status: 'dependency-missing', skill, target });
+      else if (!sameRevision(registry.skills[target].source, source)) findings.push({ status: 'dependency-conflict', skill, target });
+      else if (active.has(target)) findings.push({ status: 'dependency-cycle', skill, target });
+      else visit(target);
+    }
+    active.delete(skill);
+    visited.add(skill);
+  }
+  for (const skill of graph.keys()) visit(skill);
+  return findings;
+}
+
+function isDependencyFinding(finding) {
+  return finding.status === 'invalid-dependency-manifest' || finding.status.startsWith('dependency-');
+}
+
+function dependencyTargets(registry, graph) {
+  const targets = new Set();
+  for (const dependencies of graph.values()) {
+    for (const { id, source } of dependencies) {
+      if (own(registry.skills, id) && sameRevision(registry.skills[id].source, source)) targets.add(id);
+    }
+  }
+  return targets;
+}
+
 export function skillPath(id, skill) {
   return ['.agents', 'skills', ...(own(skill, 'categoryId') ? [skill.categoryId] : []), id].join('/');
 }
@@ -145,7 +220,15 @@ export class SkillsManager {
   configure(type, id, value) {
     assert(['categories', 'sources'].includes(type), 'Use agent() for agent configuration'); name(id);
     return this.mutate(tx => {
-      const r = this.read(); r[type][id] = value; this.write(tx, r); return r;
+      const before = this.read(), after = structuredClone(before);
+      after[type][id] = value;
+      if (type === 'sources') {
+        const dependencyErrors = r => this.inspect(r).findings.filter(isDependencyFinding);
+        const alreadyInvalid = new Set(dependencyErrors(before).map(finding => finding.skill));
+        const introduced = dependencyErrors(after).filter(finding => !alreadyInvalid.has(finding.skill));
+        assert(!introduced.length, `Source configuration conflicts with installed dependencies: ${JSON.stringify(introduced)}`);
+      }
+      this.write(tx, after); return after;
     });
   }
   projections(r) {
@@ -166,23 +249,32 @@ export class SkillsManager {
     if (p.transport === 'symlink') return fs.lstatSync(p.target).isSymbolicLink() && fs.readlinkSync(p.target) === p.link;
     return !fs.lstatSync(p.target).isSymbolicLink() && same(hashes(p.target), p.hashes);
   }
-  verify(r = this.read()) {
+  inspect(r) {
     validateRegistry(r);
     const findings = [], warnings = [];
-    const add = (status, id, path) => findings.push({ status, skill: id, path: relative(this.root, path).split(sep).join('/') });
+    const add = (status, id, path, detail) => findings.push({ status, skill: id, path: relative(this.root, path).split(sep).join('/'), ...detail });
+    const graph = new Map();
     const paths = new Map();
     for (const [id, skill] of Object.entries(r.skills)) {
       const path = this.path(id, skill); paths.set(path, id);
       if (!exists(path)) { add('missing', id, path); continue; }
-      try {
-        const actual = hashes(path);
+      let actual;
+      try { actual = hashes(path); } catch { add('invalid-entry', id, path); }
+      if (actual) {
         if (actual.payload !== skill.hashes.payload) add('payload-modified', id, path);
+        else {
+          try { graph.set(id, readDependencies(r, skill, path)); }
+          catch (error) { add('invalid-dependency-manifest', id, join(path, dependencyManifestPath), { reason: error.message }); }
+        }
         if (actual.metadata !== skill.hashes.metadata) add('metadata-modified', id, path);
-      } catch { add('invalid-entry', id, path); }
+      }
       for (const [target, refinement] of Object.entries(skill.refines ?? {})) {
         const installed = r.skills[target].source?.revision ?? r.skills[target].hashes.payload;
         if (refinement.reviewedRevision !== installed) warnings.push({ status: 'refinement-review-needed', skill: id, target });
       }
+    }
+    for (const { status, skill, target } of dependencyFindings(r, graph)) {
+      add(status, skill, join(this.path(skill, r.skills[skill]), dependencyManifestPath), { target });
     }
     for (const found of discover(safePath(this.root, '.agents/skills'))) if (!paths.has(found)) add('unregistered', null, found);
     const projections = this.projections(r);
@@ -199,11 +291,17 @@ export class SkillsManager {
         if (!projections.some(p => p.target === found || (found.startsWith(p.target + sep) && p.transport === 'copy'))) add('unregistered', null, found);
       }
     }
+    return { graph, findings, warnings };
+  }
+  verify(r = this.read()) {
+    const { findings, warnings } = this.inspect(r);
     return { ok: findings.length === 0, findings, warnings };
   }
   preflight(r, allow = () => false) {
-    const failures = this.verify(r).findings.filter(f => f.status !== 'agent-missing' && !allow(f));
+    const { graph, findings } = this.inspect(r);
+    const failures = findings.filter(f => f.status !== 'agent-missing' && !allow(f));
     assert(failures.length === 0, `Registry drift or conflict: ${JSON.stringify(failures)}`);
+    return graph;
   }
   syncProjections(tx, before, after) {
     const previous = this.projections(before), next = this.projections(after);
@@ -281,20 +379,26 @@ export class SkillsManager {
       const key = `${sourceId}:${revision ?? source.ref ?? 'HEAD'}`;
       let cached = tx.sources.get(key);
       if (!cached) {
-        checkout = fs.mkdtempSync(join(tx.workspace, 'checkout-'));
-        git(['init', '--quiet', checkout]);
-        git(['-C', checkout, 'sparse-checkout', 'init', '--cone']);
-        git(['-C', checkout, 'sparse-checkout', 'set', '--', sourcePath]);
-        const url = source.url.startsWith('.') ? resolve(this.root, source.url) : source.url;
         const resolved = this.resolveRef(source, revision);
-        git(['-C', checkout, 'remote', 'add', 'origin', url]);
-        git(['-C', checkout, 'config', 'remote.origin.promisor', 'true']);
-        git(['-C', checkout, 'config', 'remote.origin.partialclonefilter', 'blob:none']);
-        git(['-C', checkout, 'fetch', '--quiet', '--filter=blob:none', '--depth=1', 'origin', resolved]);
-        git(['-C', checkout, 'checkout', '--quiet', '--detach', 'FETCH_HEAD']);
-        resolvedRevision = git(['-C', checkout, 'rev-parse', 'HEAD']);
-        assert(resolvedRevision === resolved, 'Fetched revision differs from resolved source revision');
-        cached = { checkout, resolvedRevision, paths: new Set([sourcePath]) }; tx.sources.set(key, cached);
+        const commitKey = `${sourceId}:${resolved}`;
+        cached = tx.sources.get(commitKey);
+        if (!cached) {
+          checkout = fs.mkdtempSync(join(tx.workspace, 'checkout-'));
+          git(['init', '--quiet', checkout]);
+          git(['-C', checkout, 'sparse-checkout', 'init', '--cone']);
+          git(['-C', checkout, 'sparse-checkout', 'set', '--', sourcePath]);
+          const url = source.url.startsWith('.') ? resolve(this.root, source.url) : source.url;
+          git(['-C', checkout, 'remote', 'add', 'origin', url]);
+          git(['-C', checkout, 'config', 'remote.origin.promisor', 'true']);
+          git(['-C', checkout, 'config', 'remote.origin.partialclonefilter', 'blob:none']);
+          git(['-C', checkout, 'fetch', '--quiet', '--filter=blob:none', '--depth=1', 'origin', resolved]);
+          git(['-C', checkout, 'checkout', '--quiet', '--detach', 'FETCH_HEAD']);
+          resolvedRevision = git(['-C', checkout, 'rev-parse', 'HEAD']);
+          assert(resolvedRevision === resolved, 'Fetched revision differs from resolved source revision');
+          cached = { checkout, resolvedRevision, paths: new Set([sourcePath]) };
+          tx.sources.set(commitKey, cached);
+        }
+        tx.sources.set(key, cached);
       }
       ({ checkout, resolvedRevision } = cached);
       if (!cached.paths.has(sourcePath)) {
@@ -306,21 +410,83 @@ export class SkillsManager {
     } else checkout = safePath(this.root, source.path);
     const path = safePath(checkout, sourcePath);
     const digest = hashes(path);
-    return { path, revision: resolvedRevision ?? digest.payload };
+    return { path, revision: resolvedRevision ?? digest.payload, hashes: digest };
+  }
+  stageExternal(tx, after, graph, staged, id, source, { categoryId, restore } = {}) {
+    const previous = own(after.skills, id) ? after.skills[id] : undefined;
+    const fetched = this.fetch(tx, after, source.id, source.path, source.revision);
+    const skill = {
+      ...(previous ?? (categoryId === undefined ? {} : { categoryId })),
+      source: { id: source.id, path: source.path, revision: fetched.revision },
+      hashes: fetched.hashes
+    };
+    const target = this.path(id, skill);
+    let directory = fetched.path;
+    if (previous) {
+      directory = fs.mkdtempSync(join(tx.workspace, 'payload-'));
+      fs.cpSync(fetched.path, directory, { recursive: true });
+      const metadata = safePath(this.root, join(target, 'agents/openai.yaml'));
+      const nextMetadata = join(directory, 'agents/openai.yaml');
+      if (exists(metadata)) {
+        fs.mkdirSync(dirname(nextMetadata), { recursive: true });
+        fs.copyFileSync(metadata, nextMetadata);
+      } else if (previous.hashes.metadata === null || !restore) fs.rmSync(nextMetadata, { force: true });
+      skill.hashes = hashes(directory);
+      if (restore) {
+        assert(skill.hashes.payload === previous.hashes.payload, 'Source no longer reproduces registered payload');
+        assert(skill.hashes.metadata === previous.hashes.metadata, 'Missing or changed local metadata cannot be reconstructed from upstream; restore it from version control first');
+      }
+    } else assert(!exists(target), `Destination already exists: ${target}`);
+    try { graph.set(id, readDependencies(after, skill, directory)); }
+    catch (error) { throw new Error(`Invalid dependency manifest for ${id}: ${error.message}`); }
+    after.skills[id] = skill;
+    staged.set(id, { target, directory });
+  }
+  stageDependencies(tx, after, graph, staged, mode) {
+    const active = new Set(), visited = new Set();
+    const visit = parent => {
+      if (visited.has(parent)) return;
+      active.add(parent);
+      for (const { id, source } of graph.get(parent) ?? []) {
+        assert(!active.has(id), `Dependency cycle: ${[...active, id].join(' → ')}`);
+        const previous = own(after.skills, id) ? after.skills[id] : undefined;
+        const matches = previous && sameRevision(previous.source, source);
+        const canUpdate = mode === 'update' && sameSource(previous?.source, source);
+        const requestedRevision = previous?.source?.revision;
+        assert(!previous || matches || (canUpdate && !staged.has(id) && !visited.has(id)),
+          `Dependency conflict: ${parent} requires ${id} at ${source.revision} from its declared source and path; selected or installed revision: ${requestedRevision ?? 'project-owned'}`);
+        if (mode === 'restore') assert(matches, `Cannot restore dependency ${id} required by ${parent} without its recorded source and revision`);
+        if (!matches || (mode === 'restore' && !graph.has(id))) {
+          try { this.stageExternal(tx, after, graph, staged, id, source, { restore: mode === 'restore' }); }
+          catch (error) { throw new Error(`Cannot resolve dependency ${id} required by ${parent}: ${error.message}`); }
+        }
+        visit(id);
+      }
+      active.delete(parent);
+      visited.add(parent);
+    };
+    for (const id of staged.keys()) visit(id);
+  }
+  applyStaged(tx, before, after, graph, staged) {
+    validateRegistry(after);
+    const findings = dependencyFindings(after, graph);
+    assert(!findings.length, `Dependency graph conflict: ${JSON.stringify(findings)}`);
+    for (const { target, directory } of staged.values()) tx.replace(target, directory);
+    return this.finish(tx, before, after);
   }
   install(id, { sourceId, sourcePath, categoryId, revision } = {}) {
     name(id);
+    subpath(sourcePath);
+    assert(sourcePath.split('/').at(-1) === id, 'Installed ID must match the source directory name');
+    if (revision !== undefined) assert(revisionPattern.test(revision), 'Explicit revision must be a full Git commit ID');
     return this.mutate(tx => {
-      const before = this.read(); this.preflight(before);
+      const before = this.read(), after = structuredClone(before), staged = new Map();
+      const graph = this.preflight(before, finding => finding.status === 'dependency-missing');
       assert(!own(before.skills, id), `Already registered: ${id}`);
-      if (revision !== undefined) assert(revisionPattern.test(revision), 'Explicit revision must be a full Git commit ID');
-      const fetched = this.fetch(tx, before, sourceId, sourcePath, revision);
-      const skill = { ...(categoryId === undefined ? {} : { categoryId }), source: { id: sourceId, path: sourcePath, revision: fetched.revision }, hashes: hashes(fetched.path) };
-      // No renaming: the selected source directory determines the installed name.
-      assert(sourcePath.split('/').at(-1) === id, 'Installed ID must match the source directory name');
-      const after = structuredClone(before); after.skills[id] = skill; validateRegistry(after);
-      const target = this.path(id, skill); assert(!exists(target), `Destination already exists: ${target}`);
-      tx.replace(target, fetched.path); return this.finish(tx, before, after);
+      if (categoryId !== undefined) { name(categoryId); assert(own(after.categories, categoryId), `Unknown category: ${categoryId}`); }
+      this.stageExternal(tx, after, graph, staged, id, { id: sourceId, path: sourcePath, revision }, { categoryId });
+      this.stageDependencies(tx, after, graph, staged, 'install');
+      return this.applyStaged(tx, before, after, graph, staged);
     });
   }
   update(id, { restore = false } = {}) { return this.reconcile([id], { restore }); }
@@ -328,32 +494,34 @@ export class SkillsManager {
   restoreAll(ids) { return this.reconcile(ids, { restore: true }); }
   reconcile(ids, { restore = false } = {}) {
     return this.mutate(tx => {
-      const before = this.read(), after = structuredClone(before);
+      const before = this.read(), after = structuredClone(before), staged = new Map();
       const selected = ids ?? Object.keys(before.skills).filter(id => before.skills[id].source);
       assert(Array.isArray(selected) && new Set(selected).size === selected.length, 'Select unique external skill IDs');
       for (const id of selected) assert(own(before.skills, id) && before.skills[id].source, `Not an external skill: ${id}`);
-      this.preflight(before, f => restore && selected.includes(f.skill) && (
-        ['payload-modified', 'missing'].includes(f.status) ||
-        (f.status === 'invalid-entry' && !exists(join(this.path(f.skill, before.skills[f.skill]), 'SKILL.md')))
-      ));
-      const replacements = [];
-      for (const id of selected) {
-        const skill = before.skills[id];
-        const fetched = this.fetch(tx, before, skill.source.id, skill.source.path, restore ? skill.source.revision : undefined);
-        const staged = fs.mkdtempSync(join(tx.workspace, 'payload-')); fs.cpSync(fetched.path, staged, { recursive: true });
-        const target = this.path(id, skill), metadata = safePath(this.root, join(target, 'agents/openai.yaml'));
-        const nextMetadata = join(staged, 'agents/openai.yaml');
-        if (exists(metadata)) { fs.mkdirSync(dirname(nextMetadata), { recursive: true }); fs.copyFileSync(metadata, nextMetadata); }
-        else if (skill.hashes.metadata === null || !restore) fs.rmSync(nextMetadata, { force: true });
-        after.skills[id].source.revision = fetched.revision; after.skills[id].hashes = hashes(staged);
-        if (restore) {
-          assert(after.skills[id].hashes.payload === skill.hashes.payload, 'Source no longer reproduces registered payload');
-          assert(after.skills[id].hashes.metadata === skill.hashes.metadata, 'Missing or changed local metadata cannot be reconstructed from upstream; restore it from version control first');
+      const graph = restore
+        ? this.inspect(before).graph
+        : this.preflight(before, finding => finding.status === 'dependency-missing' ||
+          (isDependencyFinding(finding) && selected.includes(finding.skill)));
+      let pending = selected;
+      while (pending.length) {
+        const pinned = restore ? new Set() : dependencyTargets(after, graph);
+        const eligible = pending.filter(id => !pinned.has(id));
+        if (!eligible.length) break;
+        for (const id of eligible) {
+          const source = before.skills[id].source;
+          this.stageExternal(tx, after, graph, staged, id, { ...source, revision: restore ? source.revision : undefined }, { restore });
         }
-        replacements.push({ target, staged });
+        this.stageDependencies(tx, after, graph, staged, restore ? 'restore' : 'update');
+        // An updated owner can release a pin and expose another selected root.
+        pending = pending.filter(id => !staged.has(id));
       }
-      for (const { target, staged } of replacements) tx.replace(target, staged);
-      return this.finish(tx, before, after);
+      if (restore) {
+        this.preflight(before, f => staged.has(f.skill) && (
+          ['payload-modified', 'missing'].includes(f.status) ||
+          (f.status === 'invalid-entry' && !exists(join(this.path(f.skill, before.skills[f.skill]), 'SKILL.md')))
+        ));
+      }
+      return this.applyStaged(tx, before, after, graph, staged);
     });
   }
   move(id, categoryId) {
@@ -372,7 +540,11 @@ export class SkillsManager {
   }
   remove(id) {
     return this.mutate(tx => {
-      const before = this.read(); this.preflight(before); assert(own(before.skills, id), `Unknown skill: ${id}`);
+      const before = this.read();
+      assert(own(before.skills, id), `Unknown skill: ${id}`);
+      const graph = this.preflight(before, finding => finding.skill === id && isDependencyFinding(finding));
+      const dependents = [...graph].filter(([, dependencies]) => dependencies.some(dependency => dependency.id === id)).map(([parent]) => parent);
+      assert(!dependents.length, `Cannot remove ${id}: required by ${dependents.join(', ')}`);
       const after = structuredClone(before); delete after.skills[id]; validateRegistry(after);
       const target = this.path(id, before.skills[id]); tx.replace(target, null, 'remove');
       return this.finish(tx, before, after);
@@ -392,7 +564,17 @@ export class SkillsManager {
   check(id) {
     const r = this.read(), resolvedSources = new Map();
     if (id !== undefined) assert(own(r.skills, id), `Unknown skill: ${id}`);
+    const { graph, findings } = this.inspect(r);
+    const scope = new Set(id === undefined ? [] : [id]);
+    for (const skill of scope) {
+      for (const dependency of graph.get(skill) ?? []) scope.add(dependency.id);
+    }
+    const errors = findings.filter(finding => isDependencyFinding(finding) &&
+      (id === undefined || scope.has(finding.skill) || scope.has(finding.target)));
+    assert(!errors.length, `Dependency graph conflict: ${JSON.stringify(errors)}`);
+    const pinned = dependencyTargets(r, graph);
     return Object.entries(r.skills).filter(([name, s]) => s.source && (id === undefined || name === id)).map(([name, s]) => {
+      if (pinned.has(name)) return { skill: name, status: 'pinned', revision: s.source.revision };
       const source = r.sources[s.source.id];
       if (source.type === 'copy') {
         const actual = hashes(safePath(safePath(this.root, source.path), s.source.path));

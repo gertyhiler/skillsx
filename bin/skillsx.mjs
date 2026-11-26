@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { homedir } from 'node:os';
 import { SkillsManager, adapters } from '../src/index.mjs';
+import packageInfo from '../package.json' with { type: 'json' };
 
 const help = `skillsx — registry-first skill management
 
@@ -23,14 +24,19 @@ const help = `skillsx — registry-first skill management
   remove <name>
 
 Options: --root DIR (default cwd), --global (home), --json, --help, --version
+Install resolves required packages declared in agents/skillsx.json.
 No content rewriting, script execution, automatic adoption or hidden ownership state.
 `;
 const strings = ['root', 'description', 'url', 'ref', 'copy-path', 'transport', 'agent-path', 'source', 'path', 'category', 'revision'];
 const booleans = ['global', 'json', 'help', 'version', 'metadata', 'uncategorized'];
+function terminalText(value) {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu,
+    character => `\\u${character.codePointAt(0).toString(16).padStart(4, '0')}`);
+}
 try {
   const { values: v, positionals: p } = parseArgs({ options: Object.fromEntries([...strings.map(k => [k, { type: 'string' }]), ...booleans.map(k => [k, { type: 'boolean' }])]), allowPositionals: true, strict: true });
   if (v.help) { console.log(help); process.exit(0); }
-  if (v.version) { console.log('0.1.0'); process.exit(0); }
+  if (v.version) { console.log(packageInfo.version); process.exit(0); }
   const [command, id] = p;
   if (!command) { console.log(help); process.exit(0); }
   const rules = {
@@ -72,9 +78,14 @@ try {
   if (v.json) console.log(JSON.stringify(result, null, 2));
   else if (result?.ok !== undefined) {
     console.log(result.ok ? `${command}: OK` : `${command}: findings`);
-    for (const finding of [...(result.findings ?? []), ...(result.warnings ?? [])]) console.log(`  ${finding.status}: ${finding.skill ?? finding.path}${finding.path && finding.skill ? ` (${finding.path})` : ''}`);
+    for (const finding of [...(result.findings ?? []), ...(result.warnings ?? [])]) {
+      const target = finding.target ? ` → ${finding.target}` : '';
+      const location = finding.path && finding.skill ? ` (${finding.path})` : '';
+      const reason = finding.reason ? `: ${finding.reason}` : '';
+      console.log(terminalText(`  ${finding.status}: ${finding.skill ?? finding.path}${target}${location}${reason}`));
+    }
   } else console.log(JSON.stringify(result, null, 2));
 } catch (error) {
-  console.error(`skillsx: ${error.message}`);
+  console.error(`skillsx: ${terminalText(error.message)}`);
   process.exitCode = 1;
 }

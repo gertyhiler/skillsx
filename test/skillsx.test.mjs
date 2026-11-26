@@ -193,8 +193,7 @@ test('final verification failure rolls back canonical changes and projections', 
   const { root, manager } = fixture(t); const path = ownSkill(root, manager);
   manager.agent('junie', { transport: 'copy' }); manager.configure('categories', 'project', {});
   const before = fs.readFileSync(manager.registryPath), original = manager.verify.bind(manager);
-  let calls = 0;
-  manager.verify = (...args) => ++calls > 1 ? { ok: false, findings: [{ status: 'injected' }] } : original(...args);
+  manager.verify = () => ({ ok: false, findings: [{ status: 'injected' }] });
   assert.throws(() => manager.move('example', 'project'), /Final verification/);
   assert.deepEqual(fs.readFileSync(manager.registryPath), before);
   assert.equal(exists(path), true); assert.equal(exists(join(root, '.agents/skills/project/example')), false);

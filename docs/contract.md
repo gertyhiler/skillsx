@@ -54,12 +54,12 @@ external immutable payload, regardless of its category.
 
 Git sources have `type: git`, `url`, and optional `ref` (default remote HEAD).
 Skill source records have `id`, a relative directory `path`, and a resolved full
-Git commit `revision`. `check` compares the source ref to that revision. `update`
-fetches the configured ref. `restore` fetches the recorded revision instead.
+Git commit `revision`. `check` and `update` use the configured ref unless a skill
+dependency pins a revision. `restore` fetches the recorded revision.
 Full commit refs remain pinned. Install, update and check share the same ref resolver;
 annotated tags resolve to their peeled commit. A batch reuses one fetched snapshot
-per source/ref, so skills from one source cannot mix revisions. Fetches request
-blob filtering and sparse checkout of selected directories; Git servers without
+per source/ref. Dependency declarations can specify distinct exact commits.
+Fetches request blob filtering and sparse checkout of selected directories. Git servers without
 filter support may transfer the full snapshot. Each Git operation has a five-minute
 timeout; failed operations do not accept a new registry baseline. Ambiguous remote branch/tag names are rejected;
 use a full `refs/heads/...` or `refs/tags/...` reference.
@@ -70,6 +70,45 @@ storage: restore succeeds only if the current source reproduces the recorded
 payload. Root-directory skills (source path `.`), Git submodules, payload symlinks
 and special files are not supported in v1. Git credentials belong in normal Git
 credential/SSH configuration, never in registry URLs.
+
+## Skill dependencies
+
+A skill may declare its dependencies in `agents/skillsx.json`, a JSON object with
+`version: 1` and a `dependencies` array. Each entry has one of these forms:
+
+- `{ "path": "skills/report" }` uses the same Git source and resolved commit as
+  the declaring skill. The declaring skill must come from Git.
+- `{ "url": "https://github.com/example/skills.git", "path": "skills/report", "revision": "0123456789abcdef0123456789abcdef01234567" }`
+  uses a full commit ID. The URL must match exactly one registered Git source.
+  That source's configured ref has no effect on this pin.
+
+Paths are relative to the source repository. The final directory name determines
+the dependency ID. New dependencies are installed flat. A registered skill with
+the same ID is reused when its Git source, path and revision match. A different
+source, path or required revision for that ID is a conflict. Cycles are invalid.
+
+The registry remains at version 1. Each installed dependency has an ordinary
+registry entry with its resolved source, revision and hashes. The manifest itself
+is a hashed payload file. `agents/openai.yaml` remains the optional consumer
+interface file and retains its existing update rules.
+
+- `install` resolves the full dependency graph and installs it atomically.
+- `update` uses manifests from the selected packages' new revisions and applies
+  their dependency changes in the same transaction. Pins from other installed
+  dependents must still be satisfied. If a batch selects a previously independent
+  package at its configured ref and another selected package introduces a
+  different pin for it, the batch fails. Update the declaring package on its own
+  to adopt the new pin. Packages that lose their last dependent stay installed
+  until explicitly removed.
+- `restore` restores the selected packages and their transitive dependencies
+  from recorded revisions.
+- `register` and `record` validate dependencies of own skills against compatible
+  installed packages. These operations never fetch missing packages.
+- `verify` reports absent or incompatible dependencies. `check` reports
+  matching dependencies as pinned and rejects inconsistent declarations.
+- `source` rejects configuration changes that break a previously valid installed
+  dependency declaration.
+- `remove` rejects removal of a package required by an installed skill.
 
 ## Hash contract
 

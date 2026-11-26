@@ -37,6 +37,7 @@ The final verification deliberately catches a modified external skill.
 - Mix flat skills and one-level categories in one installation.
 - Register project-authored skills; report unregistered skills as errors.
 - Install external packages without rewriting their contents or running scripts.
+- Install declared skill dependencies and verify their recorded revisions.
 - Hash every payload file, including references, assets and scripts. Track
   `agents/openai.yaml` separately and preserve the consumer's version on update.
 - Fetch pinned Git revisions through the Git CLI: GitHub, GitLab, self-hosted
@@ -52,7 +53,13 @@ orchestration. A future security audit command would be separate.
 ## Run locally
 
 Requires Node.js 22+ and Git for Git sources. No runtime npm dependencies.
-The project has not been published to npm.
+Install the packaged CLI from the [GitHub release](https://github.com/gertyhiler/skillsx/releases/latest):
+
+```sh
+npm install --global https://github.com/gertyhiler/skillsx/releases/download/v0.2.0/skillsx-0.2.0.tgz
+```
+
+To run from a checkout:
 
 ```sh
 node /absolute/path/to/skillsx/bin/skillsx.mjs --help
@@ -84,9 +91,35 @@ For a fully pinned source, pass a full commit ID to `source --ref`; an explicit
 `install --revision SHA` pins that installation while future `update` follows
 its configured source ref.
 
-`check` compares the resolved source ref (or local source payload hash), not the
-meaning of its changes. A repository commit unrelated to the skill may therefore
-appear as an available update. `check` never installs anything.
+`check` compares the resolved source ref, dependency pin, or local source payload
+hash. A repository commit unrelated to the skill may therefore appear as an
+available update. `check` never installs anything.
+
+### Skill dependencies
+
+Put an optional `agents/skillsx.json` inside the skill directory:
+
+```json
+{
+  "version": 1,
+  "dependencies": [
+    { "path": "skills/report" },
+    {
+      "url": "https://github.com/example/review-skills.git",
+      "path": "skills/code-review",
+      "revision": "0123456789abcdef0123456789abcdef01234567"
+    }
+  ]
+}
+```
+
+The first entry uses the Git source and resolved commit of the declaring skill.
+The second uses a full commit ID and a URL that must already match exactly one
+Git source in the selected registry. Substitute a real commit ID for the example.
+Install the declaring package as usual. SkillsX installs its dependencies in the
+same transaction, reuses compatible installations, and reports conflicts. Newly
+installed dependencies are flat. Codex metadata stays in `agents/openai.yaml`.
+See the [dependency contract](docs/contract.md#skill-dependencies).
 
 ## Own skill
 
@@ -102,6 +135,8 @@ skillsx record release
 `verify` does not accept changes or update hashes. `record <name...>` explicitly records
 current bytes of a project-owned skill. It cannot accept an external payload.
 For a changed local interface file, use `skillsx record <name> --metadata`.
+To declare a dependency in an own skill, use a URL and full commit ID. Install the
+dependency before running `register` or `record`.
 
 To change placement without renaming:
 
@@ -159,8 +194,8 @@ See `skillsx --help` for all arguments. `verify`, `sync`, `install`, `register`,
 `record`, `move`, `remove`, `restore`, `update`, `check`, `category`, `source`,
 `agent` and `agent-remove` are available. `update` without a name attempts all
 external skills, in one transaction; any failure rolls back the selected set.
-`remove` requires the registered files/projections to be unchanged. Remove
-refinement references before removing a skill another entry refines.
+`remove` requires the registered files/projections to be unchanged. Clear any
+refinement references and dependency declarations before removing a required skill.
 
 `--json` emits machine-readable results on stdout. Diagnostics use stderr.
 Exit code 0 means success; 1 means an error, verification findings, or available
